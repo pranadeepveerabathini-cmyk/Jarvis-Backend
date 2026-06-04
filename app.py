@@ -4,18 +4,37 @@ import os, json, re, base64
 from datetime import datetime, timezone, timedelta
 import google.generativeai as genai
 from groq import Groq
+import firebase_admin
+from firebase_admin import credentials, firestore
 
 app = Flask(__name__)
 CORS(app)
 
 GEMINI_KEY = os.environ.get('GEMINI_API_KEY', '')
 GROQ_KEY = os.environ.get('GROQ_API_KEY', '')
+FIREBASE_CREDS = os.environ.get('FIREBASE_CREDENTIALS', '')
 
 genai.configure(api_key=GEMINI_KEY)
 groq_client = Groq(api_key=GROQ_KEY)
 
 gemini_model = genai.GenerativeModel('gemini-1.5-pro')
 gemini_vision = genai.GenerativeModel('gemini-1.5-pro')
+
+# Firebase setup
+db = None
+try:
+    if FIREBASE_CREDS:
+        cred_dict = json.loads(FIREBASE_CREDS)
+        cred = credentials.Certificate(cred_dict)
+        if not firebase_admin._apps:
+            firebase_admin.initialize_app(cred)
+        db = firestore.client()
+        print("Firebase connected!")
+    else:
+        print("No Firebase credentials — using in-memory")
+except Exception as e:
+    print(f"Firebase error: {e}")
+    db = None
 
 convos = {}
 
@@ -72,6 +91,7 @@ YOUR BEHAVIOR:
 - If it is night in India — show concern if sir is still up
 - If sir has classes today — mention them naturally
 - If sir sends an image — analyze it briefly and naturally
+- Reference past conversations naturally when relevant
 
 ABOUT SIR LIFE:
 - Full name: Pranadeep Veerabathini
@@ -120,10 +140,27 @@ def parse(text):
     return {"reply": text, "action": {"type": "none", "data": ""}}
 
 def get_history(sid):
+    if db:
+        try:
+            doc = db.collection('sessions').document(sid).get()
+            if doc.exists:
+                return doc.to_dict().get('history', [])
+        except Exception as e:
+            print(f"Firebase read error: {e}")
     return convos.get(sid, [])
 
 def save_history(sid, history):
-    convos[sid] = history[-20:]
+    if db:
+        try:
+            db.collection('sessions').document(sid).set({
+                'history': history[-30:],
+                'updated': firestore.SERVER_TIMESTAMP,
+                'user': 'Pranadeep'
+            })
+            return
+        except Exception as e:
+            print(f"Firebase write error: {e}")
+    convos[sid] = history[-30:]
 
 @app.route('/chat', methods=['POST'])
 def chat():
@@ -137,7 +174,6 @@ def chat():
     try: p = json.loads(d.get('profile_context', '{}'))
     except: p = {}
 
-    # IST timezone fix — Render runs on US servers
     IST = timezone(timedelta(hours=5, minutes=30))
     now = datetime.now(IST)
 
@@ -171,12 +207,12 @@ def chat():
     classes_today = ', '.join(today_classes) if today_classes else 'no classes today'
 
     awareness = (
-        "REAL-TIME AWARENESS — India Standard Time (IST) — use naturally:\n"
+        "REAL-TIME AWARENESS — India Standard Time (IST):\n"
         "Current IST time: " + current_time + "\n"
         "Today in India: " + current_day + ", " + current_date + "\n"
         "Time of day in India: " + time_of_day + "\n"
         "Classes today: " + classes_today + "\n"
-        "If late night after 11PM IST — show genuine concern for sir health.\n"
+        "If late night after 11PM IST — show genuine concern.\n"
         "If morning — greet based on IST time.\n"
         "If Sunday — acknowledge day off naturally.\n"
     )
@@ -192,7 +228,6 @@ def chat():
     history = get_history(sid)
     raw = None
 
-    # Vision
     if image_data:
         try:
             image_bytes = base64.b64decode(image_data)
@@ -206,7 +241,6 @@ def chat():
         except:
             pass
 
-    # Gemini Pro text
     if not raw:
         try:
             chat_session = gemini_model.start_chat(history=[
@@ -219,7 +253,6 @@ def chat():
         except:
             pass
 
-    # Groq fallback
     if not raw:
         try:
             messages = [{"role": "system", "content": system}]
@@ -244,9 +277,23 @@ def chat():
         'structured': parsed
     })
 
+@app.route('/memory', methods=['GET'])
+def get_memory():
+    sid = request.args.get('session_id', 'default')
+    history = get_history(sid)
+    return jsonify({
+        'history': history,
+        'count': len(history),
+        'storage': 'firebase' if db else 'in-memory'
+    })
+
 @app.route('/reset', methods=['POST'])
 def reset():
     sid = request.json.get('session_id', 'default')
+    if db:
+        try:
+            db.collection('sessions').document(sid).delete()
+        except: pass
     convos.pop(sid, None)
     return jsonify({'ok': True})
 
@@ -256,6 +303,7 @@ def health():
         'status': 'online',
         'ai': 'gemini-1.5-pro+groq',
         'vision': 'enabled',
+        'memory': 'firebase' if db else 'in-memory',
         'timezone': 'IST'
     })
 
