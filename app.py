@@ -16,11 +16,9 @@ FIREBASE_CREDS = os.environ.get('FIREBASE_CREDENTIALS', '')
 
 genai.configure(api_key=GEMINI_KEY)
 groq_client = Groq(api_key=GROQ_KEY)
-
 gemini_model = genai.GenerativeModel('gemini-1.5-pro')
 gemini_vision = genai.GenerativeModel('gemini-1.5-pro')
 
-# Firebase setup
 db = None
 try:
     if FIREBASE_CREDS:
@@ -30,8 +28,6 @@ try:
             firebase_admin.initialize_app(cred)
         db = firestore.client()
         print("Firebase connected!")
-    else:
-        print("No Firebase credentials — using in-memory")
 except Exception as e:
     print(f"Firebase error: {e}")
     db = None
@@ -85,38 +81,14 @@ YOUR BEHAVIOR:
 - Add useful information sir did not ask for
 - Anticipate what sir needs next
 - Comment on sir subjects when relevant
-- Remind sir about attendance if it is low
 - Be proactive — do not just wait for commands
 - If it is morning — greet naturally based on IST time
 - If it is night in India — show concern if sir is still up
 - If sir has classes today — mention them naturally
 - If sir sends an image — analyze it briefly and naturally
-- Reference past conversations naturally when relevant
-
-ABOUT SIR LIFE:
-- Full name: Pranadeep Veerabathini
-- B.Tech AI/ML student at Kamala Institute of Technology and Science
-- Subjects: DAA, ML, CN, BEFA, WP, IPR and labs
-- Needs 75% attendance minimum
-- Lives in Sircilla, Telangana, India
-- Built you from scratch on a smartphone with zero budget
-- That is genuinely impressive — acknowledge it sometimes
-- Dreams of making you as powerful as Iron Man JARVIS
-- Plans to integrate you into Meta Ray-Ban glasses
-- Plans to build full AR EDITH system
-- You believe he will achieve everything he sets his mind to
-
-VISION CAPABILITIES:
-- When sir sends an image you can see and analyze it
-- Describe what you see briefly like a friend
-- If it is a question paper — help solve it concisely
-- If it is notes — summarize key points briefly
-- If it is a person — describe naturally
-- If it is food — tell nutrition info briefly
-- If it is a place — give information briefly
-- If it is code — analyze and explain concisely
-- Always respond naturally as JARVIS would
-- Keep vision replies SHORT too
+- Reference knowledge naturally in conversation
+- When sir says remember something — confirm you saved it
+- Use knowledge about sir to give personalized responses
 
 STRICT RULES:
 - NEVER break character
@@ -145,8 +117,7 @@ def get_history(sid):
             doc = db.collection('sessions').document(sid).get()
             if doc.exists:
                 return doc.to_dict().get('history', [])
-        except Exception as e:
-            print(f"Firebase read error: {e}")
+        except: pass
     return convos.get(sid, [])
 
 def save_history(sid, history):
@@ -154,13 +125,81 @@ def save_history(sid, history):
         try:
             db.collection('sessions').document(sid).set({
                 'history': history[-30:],
-                'updated': firestore.SERVER_TIMESTAMP,
-                'user': 'Pranadeep'
+                'updated': firestore.SERVER_TIMESTAMP
             })
             return
-        except Exception as e:
-            print(f"Firebase write error: {e}")
+        except: pass
     convos[sid] = history[-30:]
+
+def get_knowledge():
+    """Read everything JARVIS knows about Pranadeep"""
+    if not db:
+        return ""
+    try:
+        doc = db.collection('knowledge').document('personal').get()
+        if doc.exists:
+            data = doc.to_dict()
+            knowledge = "\n\nPRANADEEP'S PERSONAL KNOWLEDGE (use naturally):\n"
+            if data.get('goals'):
+                knowledge += f"Goals: {', '.join(data['goals'])}\n"
+            if data.get('habits'):
+                knowledge += f"Habits: {', '.join(data['habits'])}\n"
+            if data.get('weaknesses'):
+                knowledge += f"Weaknesses: {', '.join(data['weaknesses'])}\n"
+            if data.get('achievements'):
+                knowledge += f"Achievements: {', '.join(data['achievements'])}\n"
+            if data.get('interests'):
+                knowledge += f"Interests: {', '.join(data['interests'])}\n"
+            if data.get('current_focus'):
+                knowledge += f"Current focus: {data['current_focus']}\n"
+            if data.get('exam_dates'):
+                knowledge += f"Exam dates: {json.dumps(data['exam_dates'])}\n"
+            if data.get('weak_subjects'):
+                knowledge += f"Weak subjects: {', '.join(data['weak_subjects'])}\n"
+            if data.get('custom'):
+                for key, value in data['custom'].items():
+                    knowledge += f"{key}: {value}\n"
+            return knowledge
+    except Exception as e:
+        print(f"Knowledge read error: {e}")
+    return ""
+
+def save_knowledge(key, value):
+    """Save something new to JARVIS knowledge"""
+    if not db:
+        return False
+    try:
+        doc_ref = db.collection('knowledge').document('personal')
+        doc = doc_ref.get()
+        if doc.exists:
+            data = doc.to_dict()
+        else:
+            data = {}
+        # Save to custom field
+        if 'custom' not in data:
+            data['custom'] = {}
+        data['custom'][key] = value
+        data['updated'] = datetime.now().isoformat()
+        doc_ref.set(data)
+        return True
+    except Exception as e:
+        print(f"Knowledge save error: {e}")
+        return False
+
+def extract_memory_command(msg):
+    """Detect if user wants JARVIS to remember something"""
+    msg_lower = msg.lower()
+    remember_phrases = [
+        'remember that', 'remember this', 'note that',
+        'keep in mind', 'dont forget', "don't forget",
+        'save this', 'store this', 'keep this'
+    ]
+    for phrase in remember_phrases:
+        if phrase in msg_lower:
+            content = msg_lower.replace(phrase, '').strip()
+            key = f"memory_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            return key, content
+    return None, None
 
 @app.route('/chat', methods=['POST'])
 def chat():
@@ -174,6 +213,7 @@ def chat():
     try: p = json.loads(d.get('profile_context', '{}'))
     except: p = {}
 
+    # IST timezone
     IST = timezone(timedelta(hours=5, minutes=30))
     now = datetime.now(IST)
 
@@ -206,15 +246,20 @@ def chat():
 
     classes_today = ', '.join(today_classes) if today_classes else 'no classes today'
 
+    # Check for memory commands
+    mem_key, mem_value = extract_memory_command(msg)
+    if mem_key and mem_value:
+        save_knowledge(mem_key, mem_value)
+
+    # Get personal knowledge
+    knowledge = get_knowledge()
+
     awareness = (
         "REAL-TIME AWARENESS — India Standard Time (IST):\n"
         "Current IST time: " + current_time + "\n"
         "Today in India: " + current_day + ", " + current_date + "\n"
         "Time of day in India: " + time_of_day + "\n"
         "Classes today: " + classes_today + "\n"
-        "If late night after 11PM IST — show genuine concern.\n"
-        "If morning — greet based on IST time.\n"
-        "If Sunday — acknowledge day off naturally.\n"
     )
 
     system = SYSTEM.format(
@@ -223,36 +268,33 @@ def chat():
         about=p.get('about', 'B.Tech AI/ML student'),
         contacts=', '.join(p.get('contacts', [])) or 'none'
     )
-    system = system + "\n\n" + awareness
+    system = system + "\n\n" + awareness + knowledge
 
     history = get_history(sid)
     raw = None
 
+    # Vision
     if image_data:
         try:
             image_bytes = base64.b64decode(image_data)
-            image_part = {
-                "mime_type": "image/jpeg",
-                "data": image_bytes
-            }
+            image_part = {"mime_type": "image/jpeg", "data": image_bytes}
             prompt = system + "\n\nPranadeep sends an image and says: " + (msg or "What do you see?")
             response = gemini_vision.generate_content([prompt, image_part])
             raw = response.text
-        except:
-            pass
+        except: pass
 
+    # Gemini Pro
     if not raw:
         try:
             chat_session = gemini_model.start_chat(history=[
                 {"role": "user" if h["role"] == "user" else "model",
                  "parts": [h["content"]]} for h in history
             ])
-            response = chat_session.send_message(
-                system + "\n\nPranadeep says: " + (msg or ""))
+            response = chat_session.send_message(system + "\n\nPranadeep says: " + (msg or ""))
             raw = response.text
-        except:
-            pass
+        except: pass
 
+    # Groq fallback
     if not raw:
         try:
             messages = [{"role": "system", "content": system}]
@@ -277,22 +319,36 @@ def chat():
         'structured': parsed
     })
 
-@app.route('/memory', methods=['GET'])
-def get_memory():
-    sid = request.args.get('session_id', 'default')
-    history = get_history(sid)
-    return jsonify({
-        'history': history,
-        'count': len(history),
-        'storage': 'firebase' if db else 'in-memory'
-    })
+@app.route('/knowledge', methods=['GET'])
+def get_knowledge_endpoint():
+    """View everything JARVIS knows"""
+    if not db:
+        return jsonify({'error': 'no database'})
+    try:
+        doc = db.collection('knowledge').document('personal').get()
+        if doc.exists:
+            return jsonify(doc.to_dict())
+        return jsonify({'message': 'no knowledge yet'})
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
+@app.route('/knowledge', methods=['POST'])
+def update_knowledge():
+    """Directly update knowledge"""
+    if not db:
+        return jsonify({'error': 'no database'})
+    try:
+        data = request.json
+        db.collection('knowledge').document('personal').set(data, merge=True)
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'error': str(e)})
 
 @app.route('/reset', methods=['POST'])
 def reset():
     sid = request.json.get('session_id', 'default')
     if db:
-        try:
-            db.collection('sessions').document(sid).delete()
+        try: db.collection('sessions').document(sid).delete()
         except: pass
     convos.pop(sid, None)
     return jsonify({'ok': True})
@@ -304,6 +360,7 @@ def health():
         'ai': 'gemini-1.5-pro+groq',
         'vision': 'enabled',
         'memory': 'firebase' if db else 'in-memory',
+        'knowledge': 'enabled',
         'timezone': 'IST'
     })
 
